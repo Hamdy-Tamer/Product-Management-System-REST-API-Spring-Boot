@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>Products List</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
+
+    <style>
+        .auto-alert {
+            overflow: hidden;
+            opacity: 0;
+            transform: translateY(-8px);
+            max-height: 0;
+            margin-bottom: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+            transition: opacity 0.35s ease, transform 0.35s ease,
+                        max-height 0.35s ease, margin-bottom 0.35s ease, padding 0.35s ease;
+        }
+        .auto-alert.auto-alert-visible {
+            opacity: 1;
+            transform: translateY(0);
+            max-height: 100px;
+            margin-bottom: 1rem;
+            padding-top: 0.75rem;
+            padding-bottom: 0.75rem;
+        }
+    </style>
+</head>
+<body class="bg-light">
+
+<div class="container-fluid py-4 px-4">
+
+    <!-- Header -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="mb-0">
+            <i class="fa-solid fa-boxes-stacked text-primary me-2"></i> Product Management
+        </h2>
+
+        <div class="d-flex gap-2">
+            <a th:href="@{/products/new}" class="btn btn-primary">
+                <i class="fa-solid fa-plus me-1"></i> Add Product
+            </a>
+            <button type="button" id="deleteAllBtn" class="btn btn-danger">
+                <i class="fa-solid fa-trash-can me-1"></i> Delete All
+            </button>
+        </div>
+    </div>
+
+    <!-- Flash messages (from a full-page redirect, e.g. after add/edit) -->
+    <div th:if="${success}" id="successAlert" class="alert alert-success d-flex align-items-center auto-alert">
+        <i class="fa-solid fa-circle-check me-2"></i>
+        <span th:text="${success}"></span>
+    </div>
+    <div th:if="${error}" id="errorAlert" class="alert alert-danger d-flex align-items-center auto-alert">
+        <i class="fa-solid fa-circle-exclamation me-2"></i>
+        <span th:text="${error}"></span>
+    </div>
+
+    <!-- AJAX-driven flash message -->
+    <div id="ajaxAlert" class="alert d-none d-flex align-items-center auto-alert"></div>
+
+    <!-- Search + page size -->
+    <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+        <div class="input-group" style="max-width: 460px;">
+            <select id="searchField" class="form-select" style="max-width: 160px;">
+                <option value="id">ID</option>
+                <option value="name" selected>Name</option>
+                <option value="serialNumber">Serial Number</option>
+                <option value="brand">Brand</option>
+                <option value="category">Category</option>
+            </select>
+            <span class="input-group-text"><i class="fa-solid fa-magnifying-glass"></i></span>
+            <input type="text" id="searchInput" class="form-control" placeholder="Search value...">
+        </div>
+
+        <div class="d-flex align-items-center gap-2">
+            <label for="pageSizeSelect" class="form-label mb-0 text-muted small">Rows per page</label>
+            <select id="pageSizeSelect" class="form-select form-select-sm" style="width: auto;">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Table card -->
+    <div class="card shadow-sm border-0">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead class="table-light">
+                    <tr>
+                        <th scope="col">#</th>
+                        <th scope="col">Image</th>
+                        <th scope="col">Name</th>
+                        <th scope="col">Serial</th>
+                        <th scope="col">Brand</th>
+                        <th scope="col">Category</th>
+                        <th scope="col" class="text-end">Qty</th>
+                        <th scope="col" class="text-end">Price</th>
+                        <th scope="col" class="text-center" style="width: 230px;">Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody id="productsTbody">
+                    <!-- Rows are rendered by JS via AJAX -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="d-flex justify-content-between align-items-center mt-3">
+        <span id="resultsSummary" class="text-muted small"></span>
+        <nav>
+            <ul id="pagination" class="pagination pagination-sm mb-0"></ul>
+        </nav>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script th:inline="javascript">
+    const API_BASE = /*[[@{/api/products}]]*/ '/api/products';
+    const PLACEHOLDER = /*[[@{/images/placeholder.png}]]*/ '/images/placeholder.png';
+
+    let currentPage = 0;
+    let currentSize = 10;
+    let currentField = 'name';
+    let currentValue = '';
+    let searchDebounce = null;
+
+    const tbody = document.getElementById('productsTbody');
+    const pagination = document.getElementById('pagination');
+    const summary = document.getElementById('resultsSummary');
+    const ajaxAlert = document.getElementById('ajaxAlert');
+
+    function escapeHtml(value) {
+        const div = document.createElement('div');
+        div.textContent = value == null ? '' : String(value);
+        return div.innerHTML;
+    }
+
+    let ajaxAlertTimer = null;
+
+    function showAlert(message, type) {
+        clearTimeout(ajaxAlertTimer);
+        ajaxAlert.className = 'alert d-flex align-items-center auto-alert alert-' + type;
+        ajaxAlert.innerHTML =
+            '<i class="fa-solid ' + (type === 'danger' ? 'fa-circle-exclamation' : 'fa-circle-check') + ' me-2"></i>' +
+            '<span>' + escapeHtml(message) + '</span>';
+
+        // Force reflow so the fade-in transition actually plays even if this alert was just showing.
+        void ajaxAlert.offsetWidth;
+        ajaxAlert.classList.add('auto-alert-visible');
+
+        ajaxAlertTimer = setTimeout(() => fadeOutAlert(ajaxAlert, true), 7000);
+    }
+
+    function fadeOutAlert(el, addDNoneAfter) {
+        el.classList.remove('auto-alert-visible');
+        setTimeout(() => {
+            if (addDNoneAfter) el.classList.add('d-none');
+        }, 350); // matches the CSS transition duration
+    }
+
+    // Fade in + auto-dismiss (after 7s) any server-rendered flash alert from a full-page redirect.
+    document.querySelectorAll('#successAlert, #errorAlert').forEach(el => {
+        requestAnimationFrame(() => el.classList.add('auto-alert-visible'));
+        setTimeout(() => fadeOutAlert(el, true), 7000);
+    });
+
+    function renderRows(products) {
+        if (!products.length) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">' +
+                '<i class="fa-solid fa-inbox fa-2x d-block mb-2"></i>No products found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = products.map(p => {
+            const hasImage = p.imageUrl && p.imageUrl.trim();
+            const imgSrc = hasImage ? escapeHtml(p.imageUrl) : PLACEHOLDER;
+            return `
+                <tr>
+                    <td>${p.productID}</td>
+                    <td>
+                        <img src="${imgSrc}" alt="product" class="rounded border"
+                             style="width:56px;height:56px;object-fit:cover;"
+                             onerror="this.onerror=null;this.src='${PLACEHOLDER}';">
+                    </td>
+                    <td>${escapeHtml(p.productName)}</td>
+                    <td><code>${escapeHtml(p.serialNumber)}</code></td>
+                    <td><span class="badge bg-secondary">${escapeHtml(p.brand)}</span></td>
+                    <td><span class="badge bg-info text-dark">${escapeHtml(p.category)}</span></td>
+                    <td class="text-end">${p.quantity}</td>
+                    <td class="text-end fw-semibold">$${Number(p.price).toFixed(2)}</td>
+                    <td class="text-center text-nowrap">
+                        <a href="/products/${p.productID}/view" class="btn btn-sm btn-outline-primary" title="View">
+                            <i class="fa-solid fa-eye"></i>
+                        </a>
+                        <a href="/products/${p.productID}/edit" class="btn btn-sm btn-outline-success" title="Full update">
+                            <i class="fa-solid fa-pen-to-square"></i>
+                        </a>
+                        <button type="button" class="btn btn-sm btn-outline-danger delete-btn" title="Delete"
+                                data-id="${p.productID}">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
+                    </td>
+                </tr>`;
+        }).join('');
+
+        tbody.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', deleteProduct));
+    }
+
+    function renderPagination(pageData) {
+        const totalPages = pageData.totalPages;
+        summary.textContent = `Showing ${pageData.numberOfElements} of ${pageData.totalElements} product(s)`;
+
+        if (totalPages <= 1) {
+            pagination.innerHTML = '';
+            return;
+        }
+
+        let html = '';
+        html += pageItem('&laquo;', currentPage - 1, pageData.first);
+        for (let i = 0; i < totalPages; i++) {
+            html += pageItem(i + 1, i, false, i === currentPage);
+        }
+        html += pageItem('&raquo;', currentPage + 1, pageData.last);
+        pagination.innerHTML = html;
+
+        pagination.querySelectorAll('[data-page]').forEach(link => {
+            link.addEventListener('click', e => {
+                e.preventDefault();
+                if (link.parentElement.classList.contains('disabled')) return;
+                currentPage = parseInt(link.getAttribute('data-page'), 10);
+                loadProducts();
+            });
+        });
+    }
+
+    function pageItem(label, targetPage, disabled, active) {
+        return `<li class="page-item ${disabled ? 'disabled' : ''} ${active ? 'active' : ''}">
+                    <a class="page-link" href="#" data-page="${targetPage}">${label}</a>
+                </li>`;
+    }
+
+    function loadProducts() {
+        const params = new URLSearchParams({
+            field: currentField,
+            value: currentValue,
+            page: currentPage,
+            size: currentSize
+        });
+
+        fetch(`${API_BASE}/search?${params.toString()}`)
+            .then(res => {
+                if (!res.ok) throw new Error('Failed to load products');
+                return res.json();
+            })
+            .then(pageData => {
+                renderRows(pageData.content);
+                renderPagination(pageData);
+            })
+            .catch(() => showAlert('Could not load products.', 'danger'));
+    }
+
+    function deleteProduct(e) {
+        const id = e.currentTarget.getAttribute('data-id');
+        if (!confirm('Delete this product?')) return;
+
+        fetch(`${API_BASE}/${id}`, { method: 'DELETE' })
+            .then(res => {
+                if (!res.ok) throw new Error('Delete failed');
+                showAlert('Product deleted successfully.', 'success');
+                loadProducts();
+            })
+            .catch(() => showAlert('Could not delete product.', 'danger'));
+    }
+
+    document.getElementById('deleteAllBtn').addEventListener('click', function () {
+        if (!confirm('Delete ALL products? This cannot be undone.')) return;
+
+        fetch(API_BASE, { method: 'DELETE' })
+            .then(res => {
+                if (!res.ok) throw new Error('Delete all failed');
+                currentPage = 0;
+                showAlert('All products deleted successfully.', 'success');
+                loadProducts();
+            })
+            .catch(() => showAlert('Could not delete all products.', 'danger'));
+    });
+
+    document.getElementById('searchField').addEventListener('change', function (e) {
+        currentField = e.target.value;
+        currentPage = 0;
+        loadProducts();
+    });
+
+    document.getElementById('searchInput').addEventListener('input', function (e) {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+            currentValue = e.target.value;
+            currentPage = 0;
+            loadProducts();
+        }, 300);
+    });
+
+    document.getElementById('pageSizeSelect').addEventListener('change', function (e) {
+        currentSize = parseInt(e.target.value, 10);
+        currentPage = 0;
+        loadProducts();
+    });
+
+    loadProducts();
+</script>
+</body>
+</html>
